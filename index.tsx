@@ -22,9 +22,11 @@ import {
 const ZOOM_SPEED = 0.001;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2;
-const LEVEL_GAP = 600;
-const SIBLING_GAP = 400;
-const GRID_SIZE = 40;
+// Adjusted gaps for Vertical Layout
+const LEVEL_GAP = 500; // Vertical distance between generations
+const SIBLING_GAP = 360; // Horizontal distance between variants
+const NODE_WIDTH = 320;
+const NODE_HEIGHT = 240;
 
 function App() {
     const [graph, setGraph] = useState<GraphState>({
@@ -35,20 +37,21 @@ function App() {
         nextLabelIndex: 1
     });
     
-    const [view, setView] = useState({ x: window.innerWidth / 4, y: window.innerHeight / 4, zoom: 0.6 });
+    const [view, setView] = useState({ x: window.innerWidth / 2 - NODE_WIDTH / 2, y: 100, zoom: 0.8 });
     const [inputValue, setInputValue] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isListening, setIsListening] = useState(false);
     const [soloMode, setSoloMode] = useState(false);
     const [expandedNodeId, setExpandedNodeId] = useState<string | null>(null);
     const [showCode, setShowCode] = useState(false);
+    const [hoveredEdge, setHoveredEdge] = useState<{ id: string, x: number, y: number, prompt: string } | null>(null);
     
     const canvasRef = useRef<HTMLDivElement>(null);
     const isPanning = useRef(false);
     const lastPos = useRef({ x: 0, y: 0 });
     const recognitionRef = useRef<any>(null);
 
-    // Reingold-Tilford inspired layout logic
+    // Vertical Tree Layout Algorithm
     const applyLayout = useCallback((nodes: Record<string, TreeNode>, rootIds: string[]) => {
         const childrenMap: Record<string, string[]> = {};
         Object.values(nodes).forEach(n => {
@@ -58,47 +61,83 @@ function App() {
             }
         });
 
-        const subtreeHeights: Record<string, number> = {};
-        const calculateSubtreeHeight = (id: string): number => {
+        const subtreeWidths: Record<string, number> = {};
+        
+        // Post-order traversal to calculate widths
+        const calculateSubtreeWidth = (id: string): number => {
             const children = childrenMap[id] || [];
             if (children.length === 0) {
-                subtreeHeights[id] = SIBLING_GAP;
+                subtreeWidths[id] = SIBLING_GAP;
                 return SIBLING_GAP;
             }
-            const totalHeight = children.reduce((acc, cid) => acc + calculateSubtreeHeight(cid), 0);
-            subtreeHeights[id] = Math.max(SIBLING_GAP, totalHeight);
-            return subtreeHeights[id];
+            const totalWidth = children.reduce((acc, cid) => acc + calculateSubtreeWidth(cid), 0);
+            subtreeWidths[id] = Math.max(SIBLING_GAP, totalWidth);
+            return subtreeWidths[id];
         };
 
-        rootIds.forEach(calculateSubtreeHeight);
+        rootIds.forEach(calculateSubtreeWidth);
 
         const newNodes = { ...nodes };
-        const positionNode = (id: string, x: number, minY: number) => {
+        
+        // Pre-order traversal to set positions
+        const positionNode = (id: string, y: number, minX: number) => {
             const node = newNodes[id];
-            const height = subtreeHeights[id];
+            const width = subtreeWidths[id];
+            
+            // Center the node horizontally within its allocated subtree width
             node.position = {
-                x: x,
-                y: minY + (height / 2) - 120 // Center relative to allocated block height
+                x: minX + (width / 2) - (NODE_WIDTH / 2),
+                y: y
             };
 
-            let currentY = minY;
+            let currentX = minX;
             const children = childrenMap[id] || [];
             children.forEach(cid => {
-                positionNode(cid, x + LEVEL_GAP, currentY);
-                currentY += subtreeHeights[cid];
+                positionNode(cid, y + LEVEL_GAP, currentX);
+                currentX += subtreeWidths[cid];
             });
         };
 
-        let rootY = 0;
+        let rootX = 0;
         rootIds.forEach(rid => {
-            positionNode(rid, 100, rootY);
-            rootY += subtreeHeights[rid];
+            positionNode(rid, 100, rootX);
+            rootX += subtreeWidths[rid];
         });
 
         return newNodes;
     }, []);
 
-    // Stable Voice Transcription using Web Speech API
+    // Fit to Screen (Overview Mode)
+    const fitView = () => {
+        const nodeVals: TreeNode[] = Object.values(graph.nodes);
+        if (nodeVals.length === 0) return;
+        
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        nodeVals.forEach(n => {
+            minX = Math.min(minX, n.position.x);
+            maxX = Math.max(maxX, n.position.x + NODE_WIDTH);
+            minY = Math.min(minY, n.position.y);
+            maxY = Math.max(maxY, n.position.y + NODE_HEIGHT);
+        });
+
+        const padding = 100;
+        const width = maxX - minX + padding * 2;
+        const height = maxY - minY + padding * 2;
+        
+        const scale = Math.min(
+            (window.innerWidth - 100) / width, 
+            (window.innerHeight - 100) / height,
+            0.9
+        );
+
+        setView({
+            x: (window.innerWidth - width * scale) / 2 - minX * scale + padding * scale,
+            y: (window.innerHeight - height * scale) / 2 - minY * scale + padding * scale,
+            zoom: scale
+        });
+    };
+
+    // Stable Voice Transcription
     useEffect(() => {
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         if (SpeechRecognition) {
@@ -108,21 +147,13 @@ function App() {
             recognition.lang = 'en-US';
 
             recognition.onresult = (event: any) => {
-                let interimTranscript = '';
                 for (let i = event.resultIndex; i < event.results.length; ++i) {
                     if (event.results[i].isFinal) {
                         setInputValue(prev => (prev.trim() + ' ' + event.results[i][0].transcript).trim());
-                    } else {
-                        interimTranscript += event.results[i][0].transcript;
                     }
                 }
             };
-
-            recognition.onerror = (event: any) => {
-                console.error("Speech Recognition Error", event.error);
-                setIsListening(false);
-            };
-
+            recognition.onerror = () => setIsListening(false);
             recognitionRef.current = recognition;
         }
     }, []);
@@ -161,14 +192,15 @@ function App() {
         });
     };
 
-    const clearSelection = () => {
-        setGraph(prev => ({ ...prev, selectedNodeIds: [], activeNodeId: null }));
-    };
-
     const handleNodeDoubleClick = (id: string) => {
         setExpandedNodeId(id);
     };
 
+    const clearSelection = () => {
+        setGraph(prev => ({ ...prev, selectedNodeIds: [], activeNodeId: null }));
+    };
+
+    // Pan & Zoom
     useEffect(() => {
         const el = canvasRef.current;
         if (!el) return;
@@ -236,11 +268,11 @@ function App() {
                 id,
                 parentId: primaryParent?.id || null,
                 prompt: currentPrompt,
-                styleName: 'Designing...',
+                styleName: 'Thinking...',
                 html: '',
                 status: 'streaming',
                 depth: (primaryParent?.depth || 0) + 1,
-                position: { x: 0, y: 0 }, // Will be set by layout
+                position: { x: 0, y: 0 },
                 childrenIds: [],
                 indexLabel: `V${labelCounter++}`
             };
@@ -249,27 +281,34 @@ function App() {
         const nextRootIds = primaryParent ? graph.rootIds : [...graph.rootIds, ...newIds];
         const initialLayout = applyLayout(newNodesLocal, nextRootIds);
 
-        // Auto-center view on the new primary variant
-        const targetId = newIds[variantsCount === 1 ? 0 : 1];
-        const targetNode = initialLayout[targetId];
+        // Center view on the new variants
+        // Calculate center X of the new group
+        let minNewX = Infinity;
+        let maxNewX = -Infinity;
+        let avgY = 0;
+        newIds.forEach(id => {
+            const n = initialLayout[id];
+            if (n) {
+                minNewX = Math.min(minNewX, n.position.x);
+                maxNewX = Math.max(maxNewX, n.position.x + NODE_WIDTH);
+                avgY = n.position.y;
+            }
+        });
+        const centerX = (minNewX + maxNewX) / 2;
+        const centerY = avgY + NODE_HEIGHT / 2;
 
-        if (targetNode) {
-            const nodeCenterX = targetNode.position.x + 160; 
-            const nodeCenterY = targetNode.position.y + 120;
-            
-            setView(prev => ({
-                ...prev,
-                x: window.innerWidth / 2 - nodeCenterX * prev.zoom,
-                y: window.innerHeight / 2 - nodeCenterY * prev.zoom
-            }));
-        }
+        setView(prev => ({
+            ...prev,
+            x: window.innerWidth / 2 - centerX * prev.zoom,
+            y: window.innerHeight / 2 - centerY * prev.zoom
+        }));
 
         setGraph(prev => ({
             ...prev,
             nodes: initialLayout,
             rootIds: nextRootIds,
-            selectedNodeIds: [targetId],
-            activeNodeId: targetId,
+            selectedNodeIds: [newIds[variantsCount === 1 ? 0 : 1]],
+            activeNodeId: newIds[variantsCount === 1 ? 0 : 1],
             nextLabelIndex: labelCounter
         }));
 
@@ -281,8 +320,7 @@ function App() {
                 baseContext = parents.map((p) => `### REFERENCE ${p.indexLabel}:\nStyle: ${p.styleName}\nCode: ${p.html}`).join('\n\n');
             }
 
-            // Increase serendipity with more distinct visual metaphors
-            const stylePrompt = `Create a JSON array of ${variantsCount} high-end, radically distinct design metaphors for: "${currentPrompt}". Ensure they feel like professional, high-fidelity products. Avoid "hacker" tropes unless specifically requested. Output only: ["Name 1", "Name 2", "Name 3"]`;
+            const stylePrompt = `Create a JSON array of ${variantsCount} high-end, radically distinct design metaphors for: "${currentPrompt}". Output only: ["Name 1", "Name 2", "Name 3"]`;
             const styleRes = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: { role: 'user', parts: [{ text: stylePrompt }] }
@@ -290,9 +328,9 @@ function App() {
             const styles = JSON.parse(styleRes.text?.match(/\[.*\]/)?.[0] || '["Alpine Glass", "Industrial Brutalist", "Lumina Flow"]');
 
             const creativeDirectives = [
-                "REIMAGINE. Completely break the existing layout. Surprise the user with a fresh structural perspective.",
-                "REFINE. Keep the parent's logic but polish the typography, spacing, and micro-interactions to perfection.",
-                "EXPERIMENTAL. Use bold color gradients, abstract SVG patterns, and unique navigation patterns."
+                "REIMAGINE. Completely break the existing layout structure.",
+                "REFINE. Polish the typography and spacing to perfection.",
+                "EXPERIMENTAL. Use bold colors and unique navigation."
             ];
 
             await Promise.all(newIds.map(async (id, idx) => {
@@ -304,14 +342,12 @@ function App() {
                 THEME: "${styleName}"
                 DIRECTIVE: ${directive}
 
-                ${baseContext ? `\n### EVOLVE FROM THESE REFERENCES:\n${baseContext}\n` : `\nSTART FRESH PROTOTYPE.\n`}
+                ${baseContext ? `\n### EVOLVE FROM REFERENCES:\n${baseContext}\n` : `\nSTART FRESH.\n`}
 
                 RULES:
-                1. Output ONLY valid, ready-to-run raw HTML/CSS. NO MARKDOWN.
-                2. Adhere STRICTLY to user intent. (e.g. If they say 'Christmas', use festive palettes).
-                3. The user may refer to variants by label (e.g. 'V1').
-                4. Use modern CSS: Grid, Flexbox, Variable-based animations.
-                5. Ensure components are robust and beautiful.`;
+                1. Output ONLY valid raw HTML/CSS.
+                2. User may refer to variants by label (e.g. 'V1').
+                3. Use modern CSS (Grid, Flexbox).`;
 
                 const stream = await ai.models.generateContentStream({
                     model: 'gemini-3-pro-preview',
@@ -327,7 +363,7 @@ function App() {
                     }));
                 }
 
-                setGraph(prev => ({ ...prev, nodes: { ...prev.nodes, [id]: { ...prev.nodes[id], html: fullHtml, status: 'complete' } } }));
+                setGraph(prev => ({ ...prev, nodes: { ...prev.nodes, [id]: { ...prev.nodes[id], html: fullHtml, styleName, status: 'complete' } } }));
             }));
 
         } catch (e) {
@@ -339,8 +375,6 @@ function App() {
 
     const activeNode = graph.activeNodeId ? graph.nodes[graph.activeNodeId] : null;
     const expandedNode = expandedNodeId ? graph.nodes[expandedNodeId] : null;
-
-    // Selected labels for reference bar
     const selectedLabels = graph.selectedNodeIds.map(id => graph.nodes[id]?.indexLabel).filter(Boolean).join(', ');
 
     return (
@@ -355,7 +389,7 @@ function App() {
                         <div 
                             key={`bg-${sid}`}
                             className="synthesis-backdrop" 
-                            style={{ left: node.position.x + 160, top: node.position.y + 120 }} 
+                            style={{ left: node.position.x + NODE_WIDTH/2, top: node.position.y + NODE_HEIGHT/2 }} 
                         />
                     );
                 })}
@@ -372,23 +406,35 @@ function App() {
                         const parent = graph.nodes[node.parentId];
                         if (!parent) return null;
                         
-                        const x1 = parent.position.x + 320;
-                        const y1 = parent.position.y + 120;
-                        const x2 = node.position.x;
-                        const y2 = node.position.y + 120;
+                        // Vertical connections: Bottom of parent to Top of child
+                        const startX = parent.position.x + NODE_WIDTH / 2;
+                        const startY = parent.position.y + NODE_HEIGHT;
+                        const endX = node.position.x + NODE_WIDTH / 2;
+                        const endY = node.position.y;
                         
                         const isPrimary = graph.activeNodeId === node.id || graph.selectedNodeIds.includes(node.id);
                         
+                        // Vertical Bezier Curve
+                        const cp1y = startY + (LEVEL_GAP * 0.5);
+                        const cp2y = endY - (LEVEL_GAP * 0.5);
+
                         return (
                             <path 
                                 key={`edge-${node.id}`}
                                 className={`edge-path ${isPrimary ? 'active' : ''}`}
-                                d={`M ${x1} ${y1} C ${x1 + 150} ${y1}, ${x2 - 150} ${y2}, ${x2} ${y2}`}
+                                d={`M ${startX} ${startY} C ${startX} ${cp1y}, ${endX} ${cp2y}, ${endX} ${endY}`}
                                 fill="none"
-                                stroke={isPrimary ? "var(--accent-glow)" : "rgba(255,255,255,0.18)"}
+                                stroke={isPrimary ? "var(--accent-glow)" : "rgba(255,255,255,0.15)"}
                                 strokeWidth={isPrimary ? "4" : "2"}
-                                strokeOpacity={isPrimary ? "1" : "0.4"}
+                                strokeOpacity={isPrimary ? "1" : "0.5"}
                                 filter={isPrimary ? "url(#neon-glow)" : ""}
+                                onMouseEnter={(e) => setHoveredEdge({ 
+                                    id: node.id, 
+                                    x: e.clientX, 
+                                    y: e.clientY, 
+                                    prompt: node.prompt 
+                                })}
+                                onMouseLeave={() => setHoveredEdge(null)}
                             />
                         );
                     })}
@@ -433,6 +479,14 @@ function App() {
                 })}
             </div>
 
+            {/* Edge Prompt Tooltip */}
+            {hoveredEdge && (
+                <div className="edge-tooltip" style={{ left: hoveredEdge.x + 15, top: hoveredEdge.y + 15 }}>
+                    <span className="tooltip-label">Prompt used:</span>
+                    <span className="tooltip-text">"{hoveredEdge.prompt}"</span>
+                </div>
+            )}
+
             <div className="ui-overlay">
                 <div className="bottom-input">
                     <div className="input-container">
@@ -443,9 +497,9 @@ function App() {
                             {graph.selectedNodeIds.length > 0 && (
                                 <>
                                     <div className="context-pill">
-                                        <SparklesIcon /> {selectedLabels} ACTIVE
+                                        <SparklesIcon /> {selectedLabels} ANCHORED
                                     </div>
-                                    <button className="clear-selection" onClick={clearSelection}>Reset Context</button>
+                                    <button className="clear-selection" onClick={clearSelection}>Clear Context</button>
                                 </>
                             )}
                         </div>
@@ -461,7 +515,7 @@ function App() {
                                 </svg>
                             </button>
                             <input 
-                                placeholder={isListening ? "Listening to your request..." : (graph.selectedNodeIds.length > 0 ? `Describe change for ${selectedLabels}...` : "Initiate a design flow...")}
+                                placeholder={isListening ? "Listening..." : (graph.selectedNodeIds.length > 0 ? `Evolve ${selectedLabels}...` : "Start a design flow...")}
                                 value={inputValue}
                                 onChange={(e) => setInputValue(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && handleBranch()}
@@ -478,10 +532,12 @@ function App() {
                 </div>
 
                 <div className="canvas-controls">
+                    <button className="control-btn" title="Overview / Fit to Screen" onClick={fitView}>
+                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+                    </button>
                     <button className="control-btn" onClick={() => setView(v => ({ ...v, zoom: Math.min(MAX_ZOOM, v.zoom * 1.25) }))}>+</button>
                     <button className="control-btn" onClick={() => setView(v => ({ ...v, zoom: Math.max(MIN_ZOOM, v.zoom / 1.25) }))}>-</button>
                     <button className="control-btn" onClick={() => setShowCode(!showCode)}><CodeIcon /></button>
-                    <button className="control-btn" onClick={() => activeNode && setView(v => ({ ...v, x: window.innerWidth / 2 - (activeNode.position.x * v.zoom), y: window.innerHeight / 2 - (activeNode.position.y * v.zoom) }))}><GridIcon /></button>
                 </div>
             </div>
 
@@ -489,7 +545,7 @@ function App() {
                 <div className="fullscreen-overlay" onClick={() => setShowCode(false)}>
                     <div className="fullscreen-modal code-modal" onClick={(e) => e.stopPropagation()}>
                         <div className="modal-header">
-                            <h2>{activeNode.indexLabel} Architecture</h2>
+                            <h2>{activeNode.indexLabel} Source Code</h2>
                             <button className="modal-close-btn" onClick={() => setShowCode(false)}>&times;</button>
                         </div>
                         <div className="modal-body code-body">
